@@ -1,0 +1,41 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cinebrain
+      POSTGRES_PASSWORD: cinebrain_local
+      POSTGRES_DB: cinebrain
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinebrain"]
+      interval: 5s
+      retries: 10
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["127.0.0.1:11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://cinebrain:cinebrain_local@db:5432/cinebrain
+      OLLAMA_URL: http://ollama:11434
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["./data:/app/data"]
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [backend]
+volumes:
+  postgres:
+  ollama:
