@@ -15,12 +15,12 @@ def client(monkeypatch):
     factory=sessionmaker(engine,expire_on_commit=False)
     monkeypatch.setattr(main,'SessionLocal',factory);monkeypatch.setattr(main,'engine',engine)
     monkeypatch.setattr(ai,'embed',lambda _: [1.,0.])
-    def generate(task,payload):
+    def generate(task,payload,**kwargs):
         if 'Interpret' in task: return {'desired_feelings':['wonder'],'desired_aftertaste':['reflective']}
         return {'movie_id':payload['candidates'][0]['movie_id'],'why_it_fits':'You asked for wonder and reflection.','what_it_might_not_fit':'It asks for some attention.'}
     monkeypatch.setattr(ai,'generate',generate)
     with factory.begin() as db:
-        for i in range(1,7): db.add(Movie(tmdb_id=i,title=f'Film {i}',metadata_json={'year':'2000','runtime':100,'original_language':'en','vote_average':8,'vote_count':100},profile=dict(PROFILE),embedding=[1.,0.]))
+        for i in range(1,7): db.add(Movie(tmdb_id=i,title=f'Film {i}',metadata_json={'release_date':'2000-01-01','year':'2000','runtime':100,'original_language':'en','vote_average':8,'vote_count':100},profile=dict(PROFILE),embedding=[1.,0.]))
         db.add(Memory(movie_id=1,reaction={'source':'confirmed_seed','rating':None}))
     with TestClient(main.app) as c: yield c,factory
 
@@ -60,7 +60,7 @@ def test_constraints_and_validation(client):
 def test_ai_cannot_override_candidates(client,monkeypatch):
     c,_=client
     original=ai.generate
-    monkeypatch.setattr(ai,'generate',lambda task,payload:original(task,payload) if 'Interpret' in task else {'movie_id':1,'why_it_fits':'Invented','what_it_might_not_fit':''})
+    monkeypatch.setattr(ai,'generate',lambda task,payload,**kwargs:original(task,payload) if 'Interpret' in task else {'movie_id':1,'why_it_fits':'Invented','what_it_might_not_fit':''})
     assert c.post('/api/sessions',json=PAYLOAD).status_code==503
 
 def test_seen_it_is_confirmation_not_dislike(client):
@@ -73,7 +73,7 @@ def test_seen_it_is_confirmation_not_dislike(client):
 def test_failed_shuffle_rolls_back_session(client,monkeypatch):
     c,factory=client
     session=c.post('/api/sessions',json=PAYLOAD).json();sid=session['session_id']
-    monkeypatch.setattr(ai,'generate',lambda *args: (_ for _ in ()).throw(ai.AIUnavailable('Model offline')))
+    monkeypatch.setattr(ai,'generate',lambda *args,**kwargs: (_ for _ in ()).throw(ai.AIUnavailable('Model offline')))
     assert c.post(f'/api/sessions/{sid}/shuffle',json={}).status_code==503
     after=c.get('/api/sessions/'+sid).json()
     assert after['shuffle_count']==0
@@ -89,3 +89,46 @@ def test_confirmed_seed_memory_has_no_invented_reactions(client):
     assert pyaasa['reaction']['rating'] is None
     assert pyaasa['reaction']['date_watched'] is None
     assert not any(m['title'] in ['Memories of Murder','Zodiac','The Apartment'] for m in memory)
+
+def test_structured_model_output_is_corrected_not_clamped(monkeypatch):
+    from backend.app.schemas import Intent
+    replies=iter([{'energy':7.5},{'energy':.75}])
+    prompts=[]
+    def response(task,payload,**kwargs):
+        prompts.append(payload)
+        return next(replies)
+    monkeypatch.setattr(ai,'generate',response)
+    parsed=ai.structured('Interpret',{'state':'Tired'},Intent)
+    assert parsed.energy==.75
+    assert len(prompts)==2 and 'correction_required' in prompts[1]
+
+
+def test_unreleased_movies_are_excluded(client):
+    c,factory=client
+    with factory.begin() as db:
+        for movie in db.scalars(select(Movie)):
+            movie.metadata_json={**movie.metadata_json,'release_date':'2099-01-01'}
+    assert c.post('/api/sessions',json=PAYLOAD).status_code==409
+
+def test_model_calls_leave_sqlite_available_for_catalogue_writes(tmp_path,monkeypatch):
+    from sqlalchemy import event
+    engine=create_engine(f'sqlite:///{tmp_path}/concurrent.db',connect_args={'check_same_thread':False,'timeout':.1})
+    @event.listens_for(engine,'connect')
+    def foreign_keys(connection,record):
+        connection.execute('PRAGMA foreign_keys=ON')
+    Base.metadata.create_all(engine)
+    factory=sessionmaker(engine,expire_on_commit=False)
+    monkeypatch.setattr(main,'SessionLocal',factory);monkeypatch.setattr(main,'engine',engine)
+    monkeypatch.setattr(ai,'embed',lambda _: [1.,0.])
+    with factory.begin() as db:
+        db.add(Movie(tmdb_id=700,title='Eligible film',metadata_json={'release_date':'1965-01-01','year':'1965'},profile=dict(PROFILE),embedding=[1.,0.]))
+    def generate(task,payload,**kwargs):
+        if 'Interpret' in task: return {'desired_feelings':['wonder']}
+        # This separate connection must be able to commit while the model is deciding.
+        with factory.begin() as db:
+            db.add(Movie(tmdb_id=701,title='Concurrent catalogue import',metadata_json={}))
+        return {'movie_id':payload['candidates'][0]['movie_id'],'why_it_fits':'Wonder.','what_it_might_not_fit':'Slow.'}
+    monkeypatch.setattr(ai,'generate',generate)
+    with TestClient(main.app) as c:
+        assert c.post('/api/sessions',json=PAYLOAD).status_code==200
+    engine.dispose()

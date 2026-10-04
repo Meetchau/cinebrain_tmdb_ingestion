@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / '.env', extra='ignore')
 
 settings = Settings()
-engine = create_engine(settings.database_url, connect_args={'check_same_thread': False} if settings.database_url.startswith('sqlite') else {})
+engine = create_engine(settings.database_url, connect_args={'check_same_thread': False, 'timeout': 60} if settings.database_url.startswith('sqlite') else {})
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 class Base(DeclarativeBase): pass
 

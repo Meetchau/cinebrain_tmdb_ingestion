@@ -40,14 +40,14 @@ def health():
 
 @app.post('/api/sessions')
 def create_session(body: SessionInput):
-    raw=ai.generate('Interpret exactly these three answers. Return desired_feelings (list), desired_aftertaste (list), energy, cognitive_capacity, desired_pacing, emotional_intensity, complexity_tolerance, immersion. Numeric values 0..1; unspecified fields null. Do not infer long-term taste.', body.model_dump())
-    try: intent=Intent.model_validate(raw).model_dump()
-    except ValueError as exc: raise ai.AIUnavailable('Invalid session interpretation. Please retry.') from exc
+    intent=ai.structured('Interpret exactly these three answers. Return desired_feelings (list), desired_aftertaste (list), energy, cognitive_capacity, desired_pacing, emotional_intensity, complexity_tolerance, immersion. Numeric values must be decimal fractions between 0.0 and 1.0; unspecified fields null. Do not infer long-term taste.', body.model_dump(), Intent).model_dump()
     intent['exploration']={'understand':.05,'know':.2,'challenge':.6,'surprise':1}[body.trust]
     with SessionLocal.begin() as db:
-        session=ViewingSession(id=str(uuid4()),answers={'feel':body.feel,'state':body.state,'trust':body.trust},intent=intent,constraints={'max_runtime':body.max_runtime,'languages':body.languages})
-        db.add(session); db.flush()
-        if not decide(db,session): raise HTTPException(409,'No eligible enriched movies. Import and enrich a catalogue first, or loosen constraints.')
+        session=ViewingSession(id=str(uuid4()),answers={'feel':body.feel,'state':body.state,'trust':body.trust},intent=intent,constraints={'max_runtime':body.max_runtime,'languages':body.languages},shuffle_count=0)
+        db.add(session)
+        with db.no_autoflush:
+            recommendation=decide(db,session)
+        if not recommendation: raise HTTPException(409,'No eligible enriched movies. Import and enrich a catalogue first, or loosen constraints.')
         return current(db,session)
 
 @app.get('/api/sessions/{sid}')
@@ -67,8 +67,10 @@ def shuffle(sid:str, body:ShuffleInput):
         if body.reason=='seen_it' and not db.get(Memory,movie.id): db.add(Memory(movie_id=movie.id,reaction={'source':'explicit_seen_it','rating':None,'liked':None,'date_watched':None}))
         if body.reason=='too_heavy': constraints['max_intensity']=max(0,movie.profile['emotional_intensity']-.1)
         if body.reason=='too_long': constraints['max_runtime']=max(1,(movie.metadata_json.get('runtime') or 120)-1)
-        session.constraints=constraints; session.shuffle_count+=1; db.flush()
-        if not decide(db,session): raise HTTPException(409,'No more eligible movies. Try a new session with broader constraints.')
+        session.constraints=constraints; session.shuffle_count+=1
+        with db.no_autoflush:
+            recommendation=decide(db,session)
+        if not recommendation: raise HTTPException(409,'No more eligible movies. Try a new session with broader constraints.')
         return current(db,session)
 
 @app.post('/api/sessions/{sid}/select')

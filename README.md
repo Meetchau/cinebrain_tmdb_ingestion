@@ -62,11 +62,27 @@ npm run dev
 
 `DATABASE_URL` selects PostgreSQL instead of SQLite. `OLLAMA_URL`, `OLLAMA_MODEL`, and `FRONTEND_ORIGIN` can be configured in `.env`. The browser API URL defaults to `http://localhost:8000`; change `NEXT_PUBLIC_API_URL` before a frontend build when necessary.
 
+## Deeper cinema discovery
+
+The initial ten-page popularity feed is a connectivity test, not the whole cinematic library. The back-catalogue importer samples 1920s–2020s and 17 original-language routes, including Indian regional, East Asian, European, Iranian, and Arabic cinema. It takes established films and a later result page for less obvious discoveries. Date ranges exclude the latest three years because new films already have a separate feed. Route provenance is stored with each film. It never adds watched history.
+
+```bash
+venv/bin/python -m backend.app.discovery --per-route 6
+venv/bin/python -m backend.app.catalogue enrich --collection deep --limit 200
+venv/bin/python -m backend.app.discovery --report
+```
+
+For Docker, prefix the Python commands with `docker compose exec backend python` instead of `venv/bin/python`.
+
+The final shortlist balances decades, original languages, and directors among candidates within 0.18 of the strongest score. Diversity changes which candidates receive contextual judgement; it does not alter persisted fit scores or automatically reward age. Older/non-English films still have to fit the session. Common emotional word forms (for example, “hopeful”/“hope”) now match across intent and profiles. Exploration includes countries and eras as well as languages and directors.
+
+The discovery parameters use [TMDB’s official Discover API](https://developer.themoviedb.org/reference/discover-movie). Increase `--per-route` for a broader catalogue; the importer and enrichment job resume without discarding existing profiles. The original ingestion script still keeps `MAX_PAGES = 10`.
+
 ## What V1 implements
 
 - Exactly three free-form/state/exploration questions, interpreted by Ollama. Unknown state values stay null.
 - One current recommendation and persisted session recovery after refresh.
-- Watched, already presented, adult, runtime, language, and contextual burden filters enforced before LLM judgement.
+- Unreleased/unknown-release, watched, already presented, adult, runtime, language, and contextual burden filters enforced before LLM judgement.
 - Separate feel/aftertaste, experience, personality, theme, and cinematic descriptors inferred by Ollama.
 - Semantic embeddings using local `nomic-embed-text`; pgvector storage/search on PostgreSQL, cosine search on SQLite.
 - Auditable taste, feel, state, semantic, quality, and exploration score components.
@@ -77,12 +93,14 @@ npm run dev
 - Memory, taste, semantic-search, and basic session/fit analytics APIs.
 - Docker Compose, FastAPI, Next.js/React/TypeScript/Tailwind, SQLAlchemy, Alembic, PostgreSQL/pgvector, and local Ollama.
 
-The LLM cannot override hard filters or supply arbitrary movie IDs. An unavailable model produces a retryable error rather than fabricated AI output. Feedback and session transitions are transactional. PostgreSQL locks a session during state changes.
+The LLM cannot override hard filters or supply arbitrary movie IDs. Structured model output is validated with correction retries for invalid normalized scores. An unavailable model produces a retryable error rather than fabricated AI output. Feedback and session transitions are transactional. PostgreSQL locks a session during state changes.
 
 ## Validation
 
 ```bash
 venv/bin/python -m pytest backend/tests -q
+# Optional live Ollama test (disposable SQLite copy):
+venv/bin/python -m backend.tests.smoke_ollama
 cd frontend
 npm run typecheck
 npm run build
